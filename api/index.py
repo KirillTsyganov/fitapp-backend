@@ -122,9 +122,18 @@ def auth_logout():
 
 @app.route('/api/auth/me')
 def auth_me():
-    user = _current_user()
-    if not user:
+    auth = request.headers.get('Authorization', '')
+    if not auth.startswith('Bearer '):
         return jsonify({'error': 'Unauthorized'}), 401
+    try:
+        payload = pyjwt.decode(auth[7:], JWT_SECRET, algorithms=['HS256'])
+    except pyjwt.ExpiredSignatureError:
+        return jsonify({'error': 'Token expired'}), 401
+    except pyjwt.PyJWTError:
+        return jsonify({'error': 'Invalid token'}), 401
+    user = db.session.get(User, payload['sub'])
+    if not user:
+        return jsonify({'error': 'User not found', 'sub': payload['sub']}), 401
     return jsonify({'name': user.username, 'email': user.email})
 
 
