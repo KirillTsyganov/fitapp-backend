@@ -20,10 +20,10 @@ from schemas import UserCreate, SetCreate
 
 # --- Config ---
 JWT_SECRET = os.environ.get('JWT_SECRET_KEY', 'dev-only-jwt-secret')        # JWT signing
-FRONTEND_URL = os.environ.get('FRONTEND_URL', 'http://localhost:5173')
+FRONTEND_URL = os.environ.get('FRONTEND_URL', 'http://localhost:5173').rstrip('/')
 
 app = Flask(__name__)
-CORS(app, origins=[FRONTEND_URL])
+CORS(app, origins=[FRONTEND_URL], allow_headers=['Content-Type', 'Authorization'])
 app.config['SECRET_KEY'] = os.environ.get('SECRET_KEY', 'dev-only-secret')  # Flask session signing
 
 # --- Neon DB Configuration ---
