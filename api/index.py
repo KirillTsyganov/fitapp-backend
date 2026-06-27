@@ -16,15 +16,15 @@ from flask_cors import CORS
 from pydantic import ValidationError
 
 from models import db, User, WorkoutSession, PushupSet
-from schemas import UserCreate, SessionCreate, SetCreate
-
-app = Flask(__name__)
-CORS(app)
+from schemas import UserCreate, SetCreate
 
 # --- Config ---
-app.config['SECRET_KEY'] = os.environ.get('SECRET_KEY', 'dev-only-secret')  # Flask session signing
 JWT_SECRET = os.environ.get('JWT_SECRET_KEY', 'dev-only-jwt-secret')        # JWT signing
 FRONTEND_URL = os.environ.get('FRONTEND_URL', 'http://localhost:5173')
+
+app = Flask(__name__)
+CORS(app, origins=[FRONTEND_URL])
+app.config['SECRET_KEY'] = os.environ.get('SECRET_KEY', 'dev-only-secret')  # Flask session signing
 
 # --- Neon DB Configuration ---
 DATABASE_URL = os.environ.get('DATABASE_URL', '')
@@ -63,6 +63,18 @@ def _make_jwt(user: User) -> str:
     return pyjwt.encode(payload, JWT_SECRET, algorithm='HS256')
 
 
+def _current_user():
+    """Decode the Bearer JWT and return the User, or None if invalid/missing."""
+    auth = request.headers.get('Authorization', '')
+    if not auth.startswith('Bearer '):
+        return None
+    try:
+        payload = pyjwt.decode(auth[7:], JWT_SECRET, algorithms=['HS256'])
+        return db.session.get(User, payload['sub'])
+    except pyjwt.PyJWTError:
+        return None
+
+
 # ----------------------------------------------------
 # GOOGLE AUTH ROUTES
 # ----------------------------------------------------
@@ -98,7 +110,22 @@ def google_callback():
     db.session.commit()
 
     jwt_token = _make_jwt(user)
-    return redirect(f"{FRONTEND_URL}/auth/callback?token={jwt_token}")
+    # Use URL fragment so the token is never sent to servers or stored in access logs
+    return redirect(f"{FRONTEND_URL}/auth/callback#{jwt_token}")
+
+
+@app.route('/api/auth/logout')
+def auth_logout():
+    """JWT is stateless; the client drops the token. This endpoint exists for completeness."""
+    return jsonify({'message': 'Logged out'}), 200
+
+
+@app.route('/api/auth/me')
+def auth_me():
+    user = _current_user()
+    if not user:
+        return jsonify({'error': 'Unauthorized'}), 401
+    return jsonify({'name': user.username, 'email': user.email})
 
 
 # ----------------------------------------------------
@@ -127,16 +154,12 @@ def create_user():
 
 @app.route('/api/sessions', methods=['POST'])
 def start_session():
-    try:
-        data = SessionCreate(**request.get_json(force=True))
-    except ValidationError as e:
-        return jsonify({'errors': e.errors()}), 422
-
-    if not db.session.get(User, data.user_id):
-        return jsonify({'error': 'User not found'}), 404
+    user = _current_user()
+    if not user:
+        return jsonify({'error': 'Unauthorized'}), 401
 
     target = random.randint(1, 150)
-    workout = WorkoutSession(user_id=data.user_id, target_pushups=target)
+    workout = WorkoutSession(user_id=user.id, target_pushups=target)
     db.session.add(workout)
     db.session.commit()
     return jsonify({'session_id': workout.id, 'target_pushups': workout.target_pushups}), 201
@@ -144,9 +167,15 @@ def start_session():
 
 @app.route('/api/sessions/<int:session_id>/sets', methods=['POST'])
 def log_pushup_set(session_id):
+    user = _current_user()
+    if not user:
+        return jsonify({'error': 'Unauthorized'}), 401
+
     workout = db.session.get(WorkoutSession, session_id)
     if not workout:
         return jsonify({'error': 'Session not found'}), 404
+    if workout.user_id != user.id:
+        return jsonify({'error': 'Forbidden'}), 403
     if workout.is_completed:
         return jsonify({'error': 'Session already completed'}), 400
 
@@ -178,6 +207,12 @@ def log_pushup_set(session_id):
 
 @app.route('/api/users/<int:user_id>/stats', methods=['GET'])
 def get_user_stats(user_id):
+    current = _current_user()
+    if not current:
+        return jsonify({'error': 'Unauthorized'}), 401
+    if current.id != user_id:
+        return jsonify({'error': 'Forbidden'}), 403
+
     user = db.session.get(User, user_id)
     if not user:
         return jsonify({'error': 'User not found'}), 404
@@ -211,4 +246,4 @@ def get_user_stats(user_id):
 
 
 if __name__ == '__main__':
-    app.run(debug=True, port=5000)
+    app.run(debug=os.environ.get('FLASK_DEBUG', 'false').lower() == 'true', port=5000)
