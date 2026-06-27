@@ -1,1 +1,10 @@
-flask\nflask-cors
+flask
+flask-cors
+flask-sqlalchemy
+pydantic[email]
+psycopg2-binary
+python-dotenv
+authlib
+PyJWT
+requests
+sqlalchemy
