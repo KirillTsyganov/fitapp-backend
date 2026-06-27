@@ -56,11 +56,18 @@ google = oauth.register(
 
 def _make_jwt(user: User) -> str:
     payload = {
-        'sub': user.id,
+        'sub': str(user.id),
         'email': user.email,
         'exp': datetime.now(timezone.utc) + timedelta(days=7),
     }
     return pyjwt.encode(payload, JWT_SECRET, algorithm='HS256')
+
+
+def _payload_user_id(payload) -> int | None:
+    try:
+        return int(payload['sub'])
+    except (KeyError, TypeError, ValueError):
+        return None
 
 
 def _current_user():
@@ -70,7 +77,10 @@ def _current_user():
         return None
     try:
         payload = pyjwt.decode(auth[7:], JWT_SECRET, algorithms=['HS256'])
-        return db.session.get(User, payload['sub'])
+        user_id = _payload_user_id(payload)
+        if user_id is None:
+            return None
+        return db.session.get(User, user_id)
     except pyjwt.PyJWTError:
         return None
 
@@ -131,9 +141,12 @@ def auth_me():
         return jsonify({'error': 'Token expired'}), 401
     except pyjwt.PyJWTError:
         return jsonify({'error': 'Invalid token'}), 401
-    user = db.session.get(User, payload['sub'])
+    user_id = _payload_user_id(payload)
+    if user_id is None:
+        return jsonify({'error': 'Invalid token'}), 401
+    user = db.session.get(User, user_id)
     if not user:
-        return jsonify({'error': 'User not found', 'sub': payload['sub']}), 401
+        return jsonify({'error': 'User not found', 'sub': payload.get('sub')}), 401
     return jsonify({'name': user.username, 'email': user.email})
 
 
