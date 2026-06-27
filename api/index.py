@@ -85,6 +85,61 @@ def _current_user():
         return None
 
 
+def _parse_session_day_context():
+    data = request.get_json(silent=True) or {}
+    date_str = request.args.get('date') or data.get('date')
+    tz_offset_raw = request.args.get('tzOffsetMinutes') or data.get('tzOffsetMinutes', 0)
+
+    if not date_str:
+        date_str = datetime.utcnow().date().isoformat()
+
+    try:
+        tz_offset_minutes = int(tz_offset_raw)
+        local_day = datetime.strptime(date_str, '%Y-%m-%d').date()
+    except (TypeError, ValueError):
+        return None, jsonify({'error': 'Invalid date context'}), 422
+
+    start_local = datetime(local_day.year, local_day.month, local_day.day)
+    start_utc = start_local + timedelta(minutes=tz_offset_minutes)
+    end_utc = start_utc + timedelta(days=1)
+
+    return {
+        'date': date_str,
+        'tz_offset_minutes': tz_offset_minutes,
+        'start_utc': start_utc,
+        'end_utc': end_utc,
+    }, None, None
+
+
+def _find_session_for_day(user_id: int, day_context):
+    return WorkoutSession.query.filter(
+        WorkoutSession.user_id == user_id,
+        WorkoutSession.created_at >= day_context['start_utc'],
+        WorkoutSession.created_at < day_context['end_utc'],
+    ).order_by(WorkoutSession.created_at.desc()).first()
+
+
+def _serialize_session(workout: WorkoutSession, date_str: str):
+    total_reps = sum(pushup_set.reps for pushup_set in workout.sets)
+    ordered_sets = sorted(workout.sets, key=lambda pushup_set: pushup_set.created_at)
+    return {
+        'session_id': workout.id,
+        'date': date_str,
+        'target_pushups': workout.target_pushups,
+        'is_completed': workout.is_completed,
+        'total_reps': total_reps,
+        'sets': [
+            {
+                'id': pushup_set.id,
+                'reps': pushup_set.reps,
+                'created_at': pushup_set.created_at.isoformat(),
+            }
+            for pushup_set in ordered_sets
+        ],
+        'created_at': workout.created_at.isoformat(),
+    }
+
+
 # ----------------------------------------------------
 # GOOGLE AUTH ROUTES
 # ----------------------------------------------------
@@ -174,17 +229,41 @@ def create_user():
 # WORKOUT SESSION ROUTES
 # ----------------------------------------------------
 
+@app.route('/api/sessions/today', methods=['GET'])
+def get_today_session():
+    user = _current_user()
+    if not user:
+        return jsonify({'error': 'Unauthorized'}), 401
+
+    day_context, error_response, status_code = _parse_session_day_context()
+    if error_response:
+        return error_response, status_code
+
+    workout = _find_session_for_day(user.id, day_context)
+    if not workout:
+        return jsonify({'date': day_context['date'], 'session': None})
+
+    return jsonify(_serialize_session(workout, day_context['date']))
+
 @app.route('/api/sessions', methods=['POST'])
 def start_session():
     user = _current_user()
     if not user:
         return jsonify({'error': 'Unauthorized'}), 401
 
-    target = random.randint(1, 150)
+    day_context, error_response, status_code = _parse_session_day_context()
+    if error_response:
+        return error_response, status_code
+
+    existing_workout = _find_session_for_day(user.id, day_context)
+    if existing_workout:
+        return jsonify(_serialize_session(existing_workout, day_context['date'])), 200
+
+    target = random.randint(80, 150)
     workout = WorkoutSession(user_id=user.id, target_pushups=target)
     db.session.add(workout)
     db.session.commit()
-    return jsonify({'session_id': workout.id, 'target_pushups': workout.target_pushups}), 201
+    return jsonify(_serialize_session(workout, day_context['date'])), 201
 
 
 @app.route('/api/sessions/<int:session_id>/sets', methods=['POST'])
