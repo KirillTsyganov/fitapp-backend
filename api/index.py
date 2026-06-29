@@ -285,10 +285,25 @@ def log_pushup_set(session_id):
     except ValidationError as e:
         return jsonify({'errors': e.errors()}), 422
 
-    pushup_set = PushupSet(session_id=session_id, reps=data.reps)
+    # Idempotency: if this client_id was already recorded, return the existing result
+    if data.client_id:
+        existing_set = PushupSet.query.filter_by(client_id=data.client_id).first()
+        if existing_set:
+            total_reps = sum(s.reps for s in workout.sets)
+            return jsonify({
+                'set_id': existing_set.id,
+                'reps_logged': existing_set.reps,
+                'total_reps': total_reps,
+                'target_pushups': workout.target_pushups,
+                'session_completed': workout.is_completed,
+            }), 200
+
+    # Compute total BEFORE db.session.add to avoid SQLAlchemy autoflush double-counting
+    total_reps = sum(s.reps for s in workout.sets) + data.reps
+
+    pushup_set = PushupSet(session_id=session_id, reps=data.reps, client_id=data.client_id)
     db.session.add(pushup_set)
 
-    total_reps = sum(s.reps for s in workout.sets) + data.reps
     if total_reps >= workout.target_pushups:
         workout.is_completed = True
 

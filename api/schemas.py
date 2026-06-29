@@ -27,6 +27,7 @@ class SessionCreate(BaseModel):
 
 class SetCreate(BaseModel):
     reps: int = Field(..., gt=0, le=150)  # Must be greater than 0, reasonable cap
+    client_id: Optional[str] = Field(None, max_length=36)
 
 class SetResponse(BaseModel):
     id: int

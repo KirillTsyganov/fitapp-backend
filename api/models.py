@@ -35,5 +35,6 @@ class PushupSet(db.Model):
     id = db.Column(db.Integer, primary_key=True)
     session_id = db.Column(db.Integer, db.ForeignKey('workout_sessions.id'), nullable=False)
     reps = db.Column(db.Integer, nullable=False)
+    client_id = db.Column(db.String(36), unique=True, nullable=True, index=True)
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
 
