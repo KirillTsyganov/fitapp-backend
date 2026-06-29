@@ -42,6 +42,12 @@ db.init_app(app)
 
 with app.app_context():
     db.create_all()
+    # Inline schema migrations — safe to re-run on every cold start
+    with db.engine.connect() as _conn:
+        _conn.execute(db.text(
+            'ALTER TABLE pushup_sets ADD COLUMN IF NOT EXISTS client_id VARCHAR(36) UNIQUE'
+        ))
+        _conn.commit()
 
 # --- Google OAuth ---
 oauth = OAuth(app)
@@ -277,8 +283,6 @@ def log_pushup_set(session_id):
         return jsonify({'error': 'Session not found'}), 404
     if workout.user_id != user.id:
         return jsonify({'error': 'Forbidden'}), 403
-    if workout.is_completed:
-        return jsonify({'error': 'Session already completed'}), 400
 
     try:
         data = SetCreate(**request.get_json(force=True))
