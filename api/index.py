@@ -251,6 +251,29 @@ def get_today_session():
 
     return jsonify(_serialize_session(workout, day_context['date']))
 
+@app.route('/api/sessions', methods=['GET'])
+def list_sessions():
+    user = _current_user()
+    if not user:
+        return jsonify({'error': 'Unauthorized'}), 401
+
+    try:
+        tz_offset_minutes = int(request.args.get('tzOffsetMinutes', 0))
+    except (TypeError, ValueError):
+        tz_offset_minutes = 0
+
+    workouts = (
+        WorkoutSession.query
+        .filter_by(user_id=user.id)
+        .order_by(WorkoutSession.created_at.asc())
+        .all()
+    )
+    return jsonify([
+        _serialize_session(w, (w.created_at - timedelta(minutes=tz_offset_minutes)).date().isoformat())
+        for w in workouts
+    ])
+
+
 @app.route('/api/sessions', methods=['POST'])
 def start_session():
     user = _current_user()
