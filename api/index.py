@@ -16,7 +16,14 @@ from flask_cors import CORS
 from pydantic import ValidationError
 
 from models import db, User, WorkoutSession, PushupSet
-from schemas import UserCreate, SetCreate
+from schemas import UserCreate, SetCreate, RoundCreate
+
+# --- Circuit Definition ---
+CIRCUIT = [
+    {'exercise': 'pushups', 'reps': 20},
+    {'exercise': 'lunges',  'reps': 20},
+]
+REPS_PER_ROUND = sum(e['reps'] for e in CIRCUIT)  # 40
 
 # --- Config ---
 JWT_SECRET = os.environ.get('JWT_SECRET_KEY', 'dev-only-jwt-secret')        # JWT signing
@@ -46,6 +53,16 @@ with app.app_context():
     with db.engine.connect() as _conn:
         _conn.execute(db.text(
             'ALTER TABLE pushup_sets ADD COLUMN IF NOT EXISTS client_id VARCHAR(36) UNIQUE'
+        ))
+        # Widen client_id to hold compound round keys ({uuid}_{exercise})
+        _conn.execute(db.text(
+            'ALTER TABLE pushup_sets ALTER COLUMN client_id TYPE VARCHAR(50)'
+        ))
+        _conn.execute(db.text(
+            "ALTER TABLE pushup_sets ADD COLUMN IF NOT EXISTS exercise_type VARCHAR(50) NOT NULL DEFAULT 'pushups'"
+        ))
+        _conn.execute(db.text(
+            'ALTER TABLE workout_sessions ADD COLUMN IF NOT EXISTS target_rounds INTEGER'
         ))
         _conn.commit()
 
@@ -126,21 +143,30 @@ def _find_session_for_day(user_id: int, day_context):
 
 
 def _serialize_session(workout: WorkoutSession, date_str: str):
-    total_reps = sum(pushup_set.reps for pushup_set in workout.sets)
-    ordered_sets = sorted(workout.sets, key=lambda pushup_set: pushup_set.created_at)
+    total_reps = sum(s.reps for s in workout.sets)
+    target_reps = workout.target_pushups
+    target_rounds = workout.target_rounds or (target_reps // REPS_PER_ROUND if REPS_PER_ROUND else 0)
+    rounds_completed = total_reps // REPS_PER_ROUND if REPS_PER_ROUND else 0
+    movement_points = round(min(total_reps / target_reps * 100, 100), 1) if target_reps else 0
+
+    ordered_sets = sorted(workout.sets, key=lambda s: s.created_at)
     return {
         'session_id': workout.id,
         'date': date_str,
-        'target_pushups': workout.target_pushups,
+        'target_rounds': target_rounds,
+        'target_pushups': target_reps,
         'is_completed': workout.is_completed,
         'total_reps': total_reps,
+        'rounds_completed': rounds_completed,
+        'movement_points': movement_points,
         'sets': [
             {
-                'id': pushup_set.id,
-                'reps': pushup_set.reps,
-                'created_at': pushup_set.created_at.isoformat(),
+                'id': s.id,
+                'reps': s.reps,
+                'exercise_type': s.exercise_type or 'pushups',
+                'created_at': s.created_at.isoformat(),
             }
-            for pushup_set in ordered_sets
+            for s in ordered_sets
         ],
         'created_at': workout.created_at.isoformat(),
     }
@@ -288,8 +314,9 @@ def start_session():
     if existing_workout:
         return jsonify(_serialize_session(existing_workout, day_context['date'])), 200
 
-    target = random.randint(80, 150)
-    workout = WorkoutSession(user_id=user.id, target_pushups=target)
+    target_rounds = random.randint(4, 6)
+    target_pushups = target_rounds * REPS_PER_ROUND
+    workout = WorkoutSession(user_id=user.id, target_pushups=target_pushups, target_rounds=target_rounds)
     db.session.add(workout)
     db.session.commit()
     return jsonify(_serialize_session(workout, day_context['date'])), 201
@@ -344,9 +371,67 @@ def log_pushup_set(session_id):
     }), 201
 
 
-# ----------------------------------------------------
-# DASHBOARD & ANALYTICS ROUTES
-# ----------------------------------------------------
+@app.route('/api/sessions/<int:session_id>/rounds', methods=['POST'])
+def log_round(session_id):
+    """Log one completed circuit round, writing discrete per-exercise set rows."""
+    user = _current_user()
+    if not user:
+        return jsonify({'error': 'Unauthorized'}), 401
+
+    workout = db.session.get(WorkoutSession, session_id)
+    if not workout:
+        return jsonify({'error': 'Session not found'}), 404
+    if workout.user_id != user.id:
+        return jsonify({'error': 'Forbidden'}), 403
+
+    try:
+        data = RoundCreate(**request.get_json(force=True, silent=True) or {})
+    except Exception as e:
+        return jsonify({'error': 'Invalid request body'}), 422
+
+    # Idempotency: check if this round was already recorded via first exercise's client_id
+    if data.client_id:
+        first_ck = f"{data.client_id}_{CIRCUIT[0]['exercise']}"
+        if PushupSet.query.filter_by(client_id=first_ck).first():
+            total_reps = sum(s.reps for s in workout.sets)
+            target_rounds = workout.target_rounds or (workout.target_pushups // REPS_PER_ROUND)
+            return jsonify({
+                'rounds_completed': total_reps // REPS_PER_ROUND,
+                'target_rounds': target_rounds,
+                'movement_points': round(min(total_reps / workout.target_pushups * 100, 100), 1) if workout.target_pushups else 0,
+                'total_reps': total_reps,
+                'target_pushups': workout.target_pushups,
+                'is_completed': workout.is_completed,
+            }), 200
+
+    # Compute new totals before adding rows (avoids SQLAlchemy autoflush double-counting)
+    total_reps_before = sum(s.reps for s in workout.sets)
+    total_reps_after = total_reps_before + REPS_PER_ROUND
+    target_rounds = workout.target_rounds or (workout.target_pushups // REPS_PER_ROUND)
+    movement_points = round(min(total_reps_after / workout.target_pushups * 100, 100), 1) if workout.target_pushups else 0
+
+    # Write one row per exercise in the circuit
+    for exercise in CIRCUIT:
+        ex_client_id = f"{data.client_id}_{exercise['exercise']}" if data.client_id else None
+        db.session.add(PushupSet(
+            session_id=session_id,
+            reps=exercise['reps'],
+            exercise_type=exercise['exercise'],
+            client_id=ex_client_id,
+        ))
+
+    if total_reps_after >= workout.target_pushups:
+        workout.is_completed = True
+
+    db.session.commit()
+    return jsonify({
+        'rounds_completed': total_reps_after // REPS_PER_ROUND,
+        'target_rounds': target_rounds,
+        'movement_points': movement_points,
+        'total_reps': total_reps_after,
+        'target_pushups': workout.target_pushups,
+        'is_completed': workout.is_completed,
+    }), 201
 
 @app.route('/api/users/<int:user_id>/stats', methods=['GET'])
 def get_user_stats(user_id):
@@ -364,25 +449,29 @@ def get_user_stats(user_id):
         user_id=user_id, is_completed=True
     ).all()
 
-    cumulative_pushups = sum(
-        s.reps for ws in user.sessions for s in ws.sets
-    )
-
     active_session = WorkoutSession.query.filter_by(
         user_id=user_id, is_completed=False
     ).order_by(WorkoutSession.created_at.desc()).first()
 
+    # Movement Points for today's active session (or 0 if none)
+    movement_points = 0.0
     active_data = None
     if active_session:
+        total_reps = sum(s.reps for s in active_session.sets)
+        target_rounds = active_session.target_rounds or (active_session.target_pushups // REPS_PER_ROUND)
+        movement_points = round(
+            min(total_reps / active_session.target_pushups * 100, 100), 1
+        ) if active_session.target_pushups else 0.0
         active_data = {
             'id': active_session.id,
-            'target_pushups': active_session.target_pushups,
-            'sets': [{'id': s.id, 'reps': s.reps} for s in active_session.sets],
+            'target_rounds': target_rounds,
+            'rounds_completed': total_reps // REPS_PER_ROUND,
+            'movement_points': movement_points,
         }
 
     return jsonify({
         'user_id': user_id,
-        'cumulative_pushups': cumulative_pushups,
+        'movement_points': movement_points,
         'total_sessions_completed': len(completed_sessions),
         'active_session': active_data,
     })

@@ -27,7 +27,10 @@ class SessionCreate(BaseModel):
 
 class SetCreate(BaseModel):
     reps: int = Field(..., gt=0, le=150)  # Must be greater than 0, reasonable cap
-    client_id: Optional[str] = Field(None, max_length=36)
+    client_id: Optional[str] = Field(None, max_length=50)
+
+class RoundCreate(BaseModel):
+    client_id: Optional[str] = Field(None, max_length=50)
 
 class SetResponse(BaseModel):
     id: int
@@ -55,6 +58,6 @@ class SessionResponse(BaseModel):
 # ----------------------------------------------------
 class UserStatsResponse(BaseModel):
     user_id: int
-    cumulative_pushups: int
+    movement_points: float
     total_sessions_completed: int
     active_session: Optional[SessionResponse] = None

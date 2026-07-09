@@ -3,6 +3,7 @@
 ## Quick start
 
 ```
+source ~/.envs/flask/bin/activate
 python api/index.py
 ```
 

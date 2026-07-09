@@ -22,6 +22,7 @@ class WorkoutSession(db.Model):
     id = db.Column(db.Integer, primary_key=True)
     user_id = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=False)
     target_pushups = db.Column(db.Integer, nullable=False)
+    target_rounds = db.Column(db.Integer, nullable=True)
     is_completed = db.Column(db.Boolean, default=False, nullable=False)
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
 
@@ -35,6 +36,7 @@ class PushupSet(db.Model):
     id = db.Column(db.Integer, primary_key=True)
     session_id = db.Column(db.Integer, db.ForeignKey('workout_sessions.id'), nullable=False)
     reps = db.Column(db.Integer, nullable=False)
-    client_id = db.Column(db.String(36), unique=True, nullable=True, index=True)
+    exercise_type = db.Column(db.String(50), nullable=False, server_default='pushups')
+    client_id = db.Column(db.String(50), unique=True, nullable=True, index=True)
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
 
