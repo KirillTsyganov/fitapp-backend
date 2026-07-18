@@ -1,3 +1,4 @@
+import math
 import os
 import random
 import sys
@@ -15,7 +16,7 @@ from flask import Flask, jsonify, redirect, request, url_for
 from flask_cors import CORS
 from pydantic import ValidationError
 
-from models import db, User, WorkoutSession, PushupSet
+from models import db, User, WorkoutSession, PushupSet, UserSettings
 from schemas import UserCreate, SetCreate, RoundCreate
 
 # --- Circuit Definition ---
@@ -64,6 +65,21 @@ with app.app_context():
         _conn.execute(db.text(
             'ALTER TABLE workout_sessions ADD COLUMN IF NOT EXISTS target_rounds INTEGER'
         ))
+        _conn.execute(db.text(
+            'ALTER TABLE workout_sessions ADD COLUMN IF NOT EXISTS reps_per_exercise INTEGER'
+        ))
+        _conn.execute(db.text(
+            '''CREATE TABLE IF NOT EXISTS user_settings (
+                id SERIAL PRIMARY KEY,
+                user_id INTEGER UNIQUE NOT NULL REFERENCES users(id),
+                min_rounds INTEGER NOT NULL DEFAULT 2,
+                max_rounds INTEGER NOT NULL DEFAULT 8,
+                updated_at TIMESTAMP DEFAULT NOW()
+            )'''
+        ))
+        _conn.execute(db.text(
+            'ALTER TABLE user_settings ADD COLUMN IF NOT EXISTS reps_per_exercise INTEGER NOT NULL DEFAULT 20'
+        ))
         _conn.commit()
 
 # --- Google OAuth ---
@@ -75,6 +91,51 @@ google = oauth.register(
     server_metadata_url='https://accounts.google.com/.well-known/openid-configuration',
     client_kwargs={'scope': 'openid email profile'},
 )
+
+
+DEFAULT_MIN_ROUNDS = 2
+DEFAULT_MAX_ROUNDS = 8
+DEFAULT_REPS_PER_EXERCISE = 20
+
+
+def _get_or_create_settings(user: User) -> UserSettings:
+    settings = UserSettings.query.filter_by(user_id=user.id).first()
+    if not settings:
+        settings = UserSettings(
+            user_id=user.id,
+            min_rounds=DEFAULT_MIN_ROUNDS,
+            max_rounds=DEFAULT_MAX_ROUNDS,
+            reps_per_exercise=DEFAULT_REPS_PER_EXERCISE,
+        )
+        db.session.add(settings)
+        db.session.flush()
+    return settings
+
+
+def _session_reps_per_round(workout: WorkoutSession) -> int:
+    """Effective total reps per completed circuit round for this session."""
+    rpe = workout.reps_per_exercise or DEFAULT_REPS_PER_EXERCISE
+    return rpe * len(CIRCUIT)
+
+
+def _compute_target_rounds(min_r: int, max_r: int, energy_level: str) -> int:
+    """Adaptive target using tiered thirds of the min/max spread."""
+    spread = max_r - min_r
+    if energy_level == 'low':
+        lo = min_r
+        hi = min_r + math.floor(spread * 0.33)
+    elif energy_level == 'high':
+        lo = min_r + math.ceil(spread * 0.66)
+        hi = max_r
+    else:  # standard
+        lo = min_r + math.ceil(spread * 0.34)
+        hi = min_r + math.floor(spread * 0.66)
+    # Clamp and ensure valid range
+    lo = max(min_r, min(lo, max_r))
+    hi = max(min_r, min(hi, max_r))
+    if lo > hi:
+        lo, hi = min(lo, hi), max(lo, hi)
+    return random.randint(lo, hi)
 
 
 def _make_jwt(user: User) -> str:
@@ -143,10 +204,12 @@ def _find_session_for_day(user_id: int, day_context):
 
 
 def _serialize_session(workout: WorkoutSession, date_str: str):
+    rpe = workout.reps_per_exercise or DEFAULT_REPS_PER_EXERCISE
+    effective_rpr = rpe * len(CIRCUIT)  # total reps per round for this session
     total_reps = sum(s.reps for s in workout.sets)
     target_reps = workout.target_pushups
-    target_rounds = workout.target_rounds or (target_reps // REPS_PER_ROUND if REPS_PER_ROUND else 0)
-    rounds_completed = total_reps // REPS_PER_ROUND if REPS_PER_ROUND else 0
+    target_rounds = workout.target_rounds or (target_reps // effective_rpr if effective_rpr else 0)
+    rounds_completed = total_reps // effective_rpr if effective_rpr else 0
     movement_points = round(min(total_reps / target_reps * 100, 100), 1) if target_reps else 0
 
     ordered_sets = sorted(workout.sets, key=lambda s: s.created_at)
@@ -155,6 +218,7 @@ def _serialize_session(workout: WorkoutSession, date_str: str):
         'date': date_str,
         'target_rounds': target_rounds,
         'target_pushups': target_reps,
+        'reps_per_exercise': rpe,
         'is_completed': workout.is_completed,
         'total_reps': total_reps,
         'rounds_completed': rounds_completed,
@@ -234,7 +298,7 @@ def auth_me():
     user = db.session.get(User, user_id)
     if not user:
         return jsonify({'error': 'User not found', 'sub': payload.get('sub')}), 401
-    return jsonify({'name': user.username, 'email': user.email})
+    return jsonify({'id': user.id, 'name': user.username, 'email': user.email})
 
 
 # ----------------------------------------------------
@@ -273,7 +337,17 @@ def get_today_session():
 
     workout = _find_session_for_day(user.id, day_context)
     if not workout:
-        return jsonify({'date': day_context['date'], 'session': None})
+        settings = _get_or_create_settings(user)
+        db.session.commit()
+        return jsonify({
+            'date': day_context['date'],
+            'session': None,
+            'settings': {
+                'min_rounds': settings.min_rounds,
+                'max_rounds': settings.max_rounds,
+                'reps_per_exercise': settings.reps_per_exercise,
+            },
+        })
 
     return jsonify(_serialize_session(workout, day_context['date']))
 
@@ -314,9 +388,21 @@ def start_session():
     if existing_workout:
         return jsonify(_serialize_session(existing_workout, day_context['date'])), 200
 
-    target_rounds = random.randint(4, 6)
-    target_pushups = target_rounds * REPS_PER_ROUND
-    workout = WorkoutSession(user_id=user.id, target_pushups=target_pushups, target_rounds=target_rounds)
+    data = request.get_json(silent=True) or {}
+    energy_level = data.get('energy_level', 'standard')
+    if energy_level not in ('low', 'standard', 'high'):
+        energy_level = 'standard'
+
+    settings = _get_or_create_settings(user)
+    target_rounds = _compute_target_rounds(settings.min_rounds, settings.max_rounds, energy_level)
+    reps_per_round = settings.reps_per_exercise * len(CIRCUIT)
+    target_pushups = target_rounds * reps_per_round
+    workout = WorkoutSession(
+        user_id=user.id,
+        target_pushups=target_pushups,
+        target_rounds=target_rounds,
+        reps_per_exercise=settings.reps_per_exercise,
+    )
     db.session.add(workout)
     db.session.commit()
     return jsonify(_serialize_session(workout, day_context['date'])), 201
@@ -394,9 +480,10 @@ def log_round(session_id):
         first_ck = f"{data.client_id}_{CIRCUIT[0]['exercise']}"
         if PushupSet.query.filter_by(client_id=first_ck).first():
             total_reps = sum(s.reps for s in workout.sets)
-            target_rounds = workout.target_rounds or (workout.target_pushups // REPS_PER_ROUND)
+            effective_rpr = _session_reps_per_round(workout)
+            target_rounds = workout.target_rounds or (workout.target_pushups // effective_rpr)
             return jsonify({
-                'rounds_completed': total_reps // REPS_PER_ROUND,
+                'rounds_completed': total_reps // effective_rpr,
                 'target_rounds': target_rounds,
                 'movement_points': round(min(total_reps / workout.target_pushups * 100, 100), 1) if workout.target_pushups else 0,
                 'total_reps': total_reps,
@@ -405,17 +492,19 @@ def log_round(session_id):
             }), 200
 
     # Compute new totals before adding rows (avoids SQLAlchemy autoflush double-counting)
+    rpe = workout.reps_per_exercise or DEFAULT_REPS_PER_EXERCISE
+    effective_rpr = _session_reps_per_round(workout)
     total_reps_before = sum(s.reps for s in workout.sets)
-    total_reps_after = total_reps_before + REPS_PER_ROUND
-    target_rounds = workout.target_rounds or (workout.target_pushups // REPS_PER_ROUND)
+    total_reps_after = total_reps_before + effective_rpr
+    target_rounds = workout.target_rounds or (workout.target_pushups // effective_rpr)
     movement_points = round(min(total_reps_after / workout.target_pushups * 100, 100), 1) if workout.target_pushups else 0
 
-    # Write one row per exercise in the circuit
+    # Write one row per exercise using this session's reps_per_exercise
     for exercise in CIRCUIT:
         ex_client_id = f"{data.client_id}_{exercise['exercise']}" if data.client_id else None
         db.session.add(PushupSet(
             session_id=session_id,
-            reps=exercise['reps'],
+            reps=rpe,
             exercise_type=exercise['exercise'],
             client_id=ex_client_id,
         ))
@@ -425,13 +514,88 @@ def log_round(session_id):
 
     db.session.commit()
     return jsonify({
-        'rounds_completed': total_reps_after // REPS_PER_ROUND,
+        'rounds_completed': total_reps_after // effective_rpr,
         'target_rounds': target_rounds,
         'movement_points': movement_points,
         'total_reps': total_reps_after,
         'target_pushups': workout.target_pushups,
         'is_completed': workout.is_completed,
     }), 201
+
+
+@app.route('/api/sessions/<int:session_id>', methods=['DELETE'])
+def delete_session(session_id):
+    """Delete a session and all its logged sets (allows re-picking energy level)."""
+    user = _current_user()
+    if not user:
+        return jsonify({'error': 'Unauthorized'}), 401
+
+    workout = db.session.get(WorkoutSession, session_id)
+    if not workout:
+        return jsonify({'error': 'Session not found'}), 404
+    if workout.user_id != user.id:
+        return jsonify({'error': 'Forbidden'}), 403
+
+    for s in list(workout.sets):
+        db.session.delete(s)
+    db.session.delete(workout)
+    db.session.commit()
+    return '', 204
+
+
+@app.route('/api/users/<int:user_id>/settings', methods=['GET'])
+def get_user_settings(user_id):
+    current = _current_user()
+    if not current:
+        return jsonify({'error': 'Unauthorized'}), 401
+    if current.id != user_id:
+        return jsonify({'error': 'Forbidden'}), 403
+
+    settings = _get_or_create_settings(current)
+    db.session.commit()
+    return jsonify({
+        'min_rounds': settings.min_rounds,
+        'max_rounds': settings.max_rounds,
+        'reps_per_exercise': settings.reps_per_exercise,
+    })
+
+
+@app.route('/api/users/<int:user_id>/settings', methods=['PUT'])
+def update_user_settings(user_id):
+    current = _current_user()
+    if not current:
+        return jsonify({'error': 'Unauthorized'}), 401
+    if current.id != user_id:
+        return jsonify({'error': 'Forbidden'}), 403
+
+    body = request.get_json(silent=True) or {}
+    try:
+        min_r = int(body.get('min_rounds', DEFAULT_MIN_ROUNDS))
+        max_r = int(body.get('max_rounds', DEFAULT_MAX_ROUNDS))
+        rpe   = int(body.get('reps_per_exercise', DEFAULT_REPS_PER_EXERCISE))
+    except (TypeError, ValueError):
+        return jsonify({'error': 'Settings values must be integers'}), 422
+
+    if min_r < 1 or max_r < 1:
+        return jsonify({'error': 'Round values must be at least 1'}), 422
+    if min_r > max_r:
+        return jsonify({'error': 'min_rounds must not exceed max_rounds'}), 422
+    if max_r > 50:
+        return jsonify({'error': 'max_rounds must not exceed 50'}), 422
+    if rpe < 1 or rpe > 100:
+        return jsonify({'error': 'reps_per_exercise must be between 1 and 100'}), 422
+
+    settings = _get_or_create_settings(current)
+    settings.min_rounds = min_r
+    settings.max_rounds = max_r
+    settings.reps_per_exercise = rpe
+    db.session.commit()
+    return jsonify({
+        'min_rounds': settings.min_rounds,
+        'max_rounds': settings.max_rounds,
+        'reps_per_exercise': settings.reps_per_exercise,
+    })
+
 
 @app.route('/api/users/<int:user_id>/stats', methods=['GET'])
 def get_user_stats(user_id):
