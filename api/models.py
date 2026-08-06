@@ -52,3 +52,32 @@ class UserSettings(db.Model):
     reps_per_exercise = db.Column(db.Integer, nullable=False, default=20)
     updated_at = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
+
+class FlowSequence(db.Model):
+    __tablename__ = 'flow_sequences'
+
+    id = db.Column(db.Integer, primary_key=True)
+    user_id = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=False)
+    name = db.Column(db.String(120), nullable=False)
+    total_duration = db.Column(db.Integer, nullable=False, default=0)
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+
+    exercises = db.relationship(
+        'FlowExercise', backref='sequence', lazy=True,
+        cascade='all, delete-orphan',
+    )
+
+
+class FlowExercise(db.Model):
+    __tablename__ = 'flow_exercises'
+
+    id = db.Column(db.Integer, primary_key=True)
+    sequence_id = db.Column(
+        db.Integer, db.ForeignKey('flow_sequences.id', ondelete='CASCADE'), nullable=False
+    )
+    position = db.Column(db.Integer, nullable=False)
+    exercise_id = db.Column(db.String(20), nullable=False)
+    exercise_name = db.Column(db.String(120), nullable=False)
+    duration = db.Column(db.Integer, nullable=False)
+    repeats = db.Column(db.Integer, nullable=False, default=1)
+

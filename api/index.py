@@ -16,7 +16,7 @@ from flask import Flask, jsonify, redirect, request, url_for
 from flask_cors import CORS
 from pydantic import ValidationError
 
-from models import db, User, WorkoutSession, PushupSet, UserSettings
+from models import db, User, WorkoutSession, PushupSet, UserSettings, FlowSequence, FlowExercise
 from schemas import UserCreate, SetCreate, RoundCreate
 
 # --- Circuit Definition ---
@@ -38,6 +38,8 @@ app.config['SECRET_KEY'] = os.environ.get('SECRET_KEY', 'dev-only-secret')  # Fl
 DATABASE_URL = os.environ.get('DATABASE_URL', '')
 if DATABASE_URL.startswith('postgres://'):
     DATABASE_URL = DATABASE_URL.replace('postgres://', 'postgresql://', 1)
+# strip channel_binding — not a valid SQLAlchemy/psycopg2 parameter
+DATABASE_URL = DATABASE_URL.replace('channel_binding=require&', '').replace('&channel_binding=require', '').replace('channel_binding=require', '')
 
 app.config['SQLALCHEMY_DATABASE_URI'] = DATABASE_URL
 app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
@@ -49,38 +51,42 @@ app.config['SQLALCHEMY_ENGINE_OPTIONS'] = {
 db.init_app(app)
 
 with app.app_context():
-    db.create_all()
-    # Inline schema migrations — safe to re-run on every cold start
-    with db.engine.connect() as _conn:
-        _conn.execute(db.text(
-            'ALTER TABLE pushup_sets ADD COLUMN IF NOT EXISTS client_id VARCHAR(36) UNIQUE'
-        ))
-        # Widen client_id to hold compound round keys ({uuid}_{exercise})
-        _conn.execute(db.text(
-            'ALTER TABLE pushup_sets ALTER COLUMN client_id TYPE VARCHAR(50)'
-        ))
-        _conn.execute(db.text(
-            "ALTER TABLE pushup_sets ADD COLUMN IF NOT EXISTS exercise_type VARCHAR(50) NOT NULL DEFAULT 'pushups'"
-        ))
-        _conn.execute(db.text(
-            'ALTER TABLE workout_sessions ADD COLUMN IF NOT EXISTS target_rounds INTEGER'
-        ))
-        _conn.execute(db.text(
-            'ALTER TABLE workout_sessions ADD COLUMN IF NOT EXISTS reps_per_exercise INTEGER'
-        ))
-        _conn.execute(db.text(
-            '''CREATE TABLE IF NOT EXISTS user_settings (
-                id SERIAL PRIMARY KEY,
-                user_id INTEGER UNIQUE NOT NULL REFERENCES users(id),
-                min_rounds INTEGER NOT NULL DEFAULT 2,
-                max_rounds INTEGER NOT NULL DEFAULT 8,
-                updated_at TIMESTAMP DEFAULT NOW()
-            )'''
-        ))
-        _conn.execute(db.text(
-            'ALTER TABLE user_settings ADD COLUMN IF NOT EXISTS reps_per_exercise INTEGER NOT NULL DEFAULT 20'
-        ))
-        _conn.commit()
+    try:
+        db.create_all()
+        # Inline schema migrations — safe to re-run on every cold start
+        with db.engine.connect() as _conn:
+            _conn.execute(db.text(
+                'ALTER TABLE pushup_sets ADD COLUMN IF NOT EXISTS client_id VARCHAR(36) UNIQUE'
+            ))
+            # Widen client_id to hold compound round keys ({uuid}_{exercise})
+            _conn.execute(db.text(
+                'ALTER TABLE pushup_sets ALTER COLUMN client_id TYPE VARCHAR(50)'
+            ))
+            _conn.execute(db.text(
+                "ALTER TABLE pushup_sets ADD COLUMN IF NOT EXISTS exercise_type VARCHAR(50) NOT NULL DEFAULT 'pushups'"
+            ))
+            _conn.execute(db.text(
+                'ALTER TABLE workout_sessions ADD COLUMN IF NOT EXISTS target_rounds INTEGER'
+            ))
+            _conn.execute(db.text(
+                'ALTER TABLE workout_sessions ADD COLUMN IF NOT EXISTS reps_per_exercise INTEGER'
+            ))
+            _conn.execute(db.text(
+                '''CREATE TABLE IF NOT EXISTS user_settings (
+                    id SERIAL PRIMARY KEY,
+                    user_id INTEGER UNIQUE NOT NULL REFERENCES users(id),
+                    min_rounds INTEGER NOT NULL DEFAULT 2,
+                    max_rounds INTEGER NOT NULL DEFAULT 8,
+                    updated_at TIMESTAMP DEFAULT NOW()
+                )'''
+            ))
+            _conn.execute(db.text(
+                'ALTER TABLE user_settings ADD COLUMN IF NOT EXISTS reps_per_exercise INTEGER NOT NULL DEFAULT 20'
+            ))
+            _conn.commit()
+    except Exception as _startup_err:  # noqa: BLE001
+        import sys
+        print(f'[startup] DB init error (non-fatal): {_startup_err}', file=sys.stderr)
 
 # --- Google OAuth ---
 oauth = OAuth(app)
@@ -639,6 +645,113 @@ def get_user_stats(user_id):
         'total_sessions_completed': len(completed_sessions),
         'active_session': active_data,
     })
+
+
+# ----------------------------------------------------
+# FLOW SEQUENCE ROUTES
+# ----------------------------------------------------
+
+def _serialize_flow(flow: FlowSequence):
+    return {
+        'id': flow.id,
+        'name': flow.name,
+        'total_duration': flow.total_duration,
+        'created_at': flow.created_at.isoformat(),
+        'exercises': [
+            {
+                'id': ex.exercise_id,
+                'name': ex.exercise_name,
+                'duration': ex.duration,
+                'repeats': ex.repeats,
+            }
+            for ex in sorted(flow.exercises, key=lambda e: e.position)
+        ],
+    }
+
+
+@app.route('/api/flows', methods=['GET'])
+def list_flows():
+    user = _current_user()
+    if not user:
+        return jsonify({'error': 'Unauthorized'}), 401
+    flows = (
+        FlowSequence.query
+        .filter_by(user_id=user.id)
+        .order_by(FlowSequence.created_at.desc())
+        .all()
+    )
+    return jsonify([_serialize_flow(f) for f in flows])
+
+
+@app.route('/api/flows', methods=['POST'])
+def create_flow():
+    user = _current_user()
+    if not user:
+        return jsonify({'error': 'Unauthorized'}), 401
+
+    body = request.get_json(silent=True) or {}
+    name = str(body.get('name', '')).strip()[:120]
+    if not name:
+        return jsonify({'error': 'name is required'}), 422
+
+    exercises_data = body.get('exercises', [])
+    if not isinstance(exercises_data, list) or len(exercises_data) == 0:
+        return jsonify({'error': 'exercises must be a non-empty list'}), 422
+    if len(exercises_data) > 50:
+        return jsonify({'error': 'Too many exercises (max 50)'}), 422
+
+    flow = FlowSequence(user_id=user.id, name=name)
+    db.session.add(flow)
+    db.session.flush()
+
+    total_duration = 0
+    for i, ex in enumerate(exercises_data):
+        try:
+            duration = max(1, int(ex.get('duration', 30)))
+            repeats = max(1, int(ex.get('repeats', 1)))
+        except (TypeError, ValueError):
+            return jsonify({'error': f'Invalid duration or repeats at position {i}'}), 422
+        db.session.add(FlowExercise(
+            sequence_id=flow.id,
+            position=i,
+            exercise_id=str(ex.get('exercise_id', ''))[:20],
+            exercise_name=str(ex.get('exercise_name', ''))[:120],
+            duration=duration,
+            repeats=repeats,
+        ))
+        total_duration += duration * repeats
+
+    flow.total_duration = total_duration
+    db.session.commit()
+    return jsonify(_serialize_flow(flow)), 201
+
+
+@app.route('/api/flows/<int:flow_id>', methods=['GET'])
+def get_flow(flow_id):
+    user = _current_user()
+    if not user:
+        return jsonify({'error': 'Unauthorized'}), 401
+    flow = db.session.get(FlowSequence, flow_id)
+    if not flow:
+        return jsonify({'error': 'Not found'}), 404
+    if flow.user_id != user.id:
+        return jsonify({'error': 'Forbidden'}), 403
+    return jsonify(_serialize_flow(flow))
+
+
+@app.route('/api/flows/<int:flow_id>', methods=['DELETE'])
+def delete_flow(flow_id):
+    user = _current_user()
+    if not user:
+        return jsonify({'error': 'Unauthorized'}), 401
+    flow = db.session.get(FlowSequence, flow_id)
+    if not flow:
+        return jsonify({'error': 'Not found'}), 404
+    if flow.user_id != user.id:
+        return jsonify({'error': 'Forbidden'}), 403
+    db.session.delete(flow)
+    db.session.commit()
+    return '', 204
 
 
 if __name__ == '__main__':
