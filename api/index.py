@@ -5,10 +5,11 @@ import sys
 from datetime import datetime, timedelta, timezone
 
 sys.path.insert(0, os.path.dirname(__file__))
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))  # makes `coach` importable
 
 from dotenv import load_dotenv
-load_dotenv()           # .env
-load_dotenv('.env.local', override=True)  # Vercel local overrides
+load_dotenv('.env.local')  # first loaded wins: Vercel local overrides .env
+load_dotenv('.env')
 
 import jwt as pyjwt
 from authlib.integrations.flask_client import OAuth
@@ -16,8 +17,13 @@ from flask import Flask, jsonify, redirect, request, url_for
 from flask_cors import CORS
 from pydantic import ValidationError
 
-from models import db, User, WorkoutSession, PushupSet, UserSettings, FlowSequence, FlowExercise
-from schemas import UserCreate, SetCreate, RoundCreate
+from models import db, User, WorkoutSession, PushupSet, UserSettings, FlowSequence, FlowExercise, Flow
+from schemas import (
+    UserCreate, SetCreate, RoundCreate,
+    CoachChatRequest, CreateFlowRequest, FlowRecordResponse,
+)
+from coach import engine as coach_engine
+from coach.engine import CoachError
 
 # --- Circuit Definition ---
 CIRCUIT = [
@@ -752,6 +758,76 @@ def delete_flow(flow_id):
     db.session.delete(flow)
     db.session.commit()
     return '', 204
+
+
+# ----------------------------------------------------
+# AI COACH ROUTES
+# ----------------------------------------------------
+
+def _serialize_coach_flow(flow: Flow):
+    return FlowRecordResponse(
+        id=flow.id,
+        name=flow.name,
+        target_focus=flow.target_focus,
+        duration_minutes=flow.duration_minutes,
+        routine_data=flow.routine_data,
+        created_at=flow.created_at.isoformat(),
+    ).model_dump(mode='json')
+
+
+@app.route('/api/coach/chat', methods=['POST'])
+def coach_chat():
+    user = _current_user()
+    if not user:
+        return jsonify({'error': 'Unauthorized'}), 401
+
+    try:
+        data = CoachChatRequest.model_validate(request.get_json(silent=True))
+    except ValidationError as e:
+        return jsonify({'errors': e.errors(include_url=False, include_context=False)}), 422
+
+    try:
+        result = coach_engine.chat(user.id, data)
+    except CoachError as exc:
+        return jsonify({'error': str(exc)}), 502
+    return jsonify(result.model_dump(mode='json'))
+
+
+@app.route('/api/coach/flow', methods=['POST'])
+def coach_create_flow():
+    user = _current_user()
+    if not user:
+        return jsonify({'error': 'Unauthorized'}), 401
+
+    try:
+        data = CreateFlowRequest.model_validate(request.get_json(silent=True))
+    except ValidationError as e:
+        return jsonify({'errors': e.errors(include_url=False, include_context=False)}), 422
+
+    try:
+        result = coach_engine.generate_flow(user.id, data)
+    except CoachError as exc:
+        return jsonify({'error': str(exc)}), 502
+
+    flow = Flow(
+        user_id=user.id,
+        name=result.flow_name[:120],
+        target_focus=result.target_focus[:120],
+        duration_minutes=data.target_duration_minutes,
+        routine_data=result.model_dump(mode='json'),
+    )
+    db.session.add(flow)
+    db.session.commit()
+    return jsonify(_serialize_coach_flow(flow)), 201
+
+
+@app.route('/api/coach/flows', methods=['GET'])
+def coach_list_flows():
+    user = _current_user()
+    if not user:
+        return jsonify({'error': 'Unauthorized'}), 401
+    flows = Flow.query.filter_by(user_id=user.id).order_by(Flow.created_at.desc()).all()
+    return jsonify([_serialize_coach_flow(f) for f in flows])
 
 
 if __name__ == '__main__':

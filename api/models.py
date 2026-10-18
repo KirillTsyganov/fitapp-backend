@@ -81,3 +81,18 @@ class FlowExercise(db.Model):
     duration = db.Column(db.Integer, nullable=False)
     repeats = db.Column(db.Integer, nullable=False, default=1)
 
+
+class Flow(db.Model):
+    """AI-generated, time-bound routine (distinct from user-built FlowSequence)."""
+    __tablename__ = 'flows'
+
+    id = db.Column(db.Integer, primary_key=True)
+    user_id = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=False)
+    name = db.Column(db.String(120), nullable=False)
+    target_focus = db.Column(db.String(120), nullable=False)  # e.g., "Hamstrings & Hip Mobility"
+    duration_minutes = db.Column(db.Integer, nullable=False, default=20)
+    routine_data = db.Column(db.JSON, nullable=False)  # Serialized CoachWorkoutResponse
+    created_at = db.Column(db.DateTime, default=datetime.utcnow, nullable=False)
+
+    user = db.relationship('User', backref=db.backref('flows', lazy=True))
+
