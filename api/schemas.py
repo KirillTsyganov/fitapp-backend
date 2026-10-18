@@ -100,12 +100,12 @@ class CoachWorkoutResponse(BaseModel):
 class CoachChatRequest(BaseModel):
     message: str = Field(..., min_length=1, max_length=2000)
     available_equipment: Optional[List[str]] = None
-    target_duration_minutes: Optional[int] = Field(None, ge=5, le=240)
+    target_duration_minutes: Optional[int] = Field(None, ge=5, le=45)
     context_overrides: Optional[dict] = None
 
 class CreateFlowRequest(BaseModel):
     target_focus: str = Field(..., min_length=2, max_length=120)  # e.g. "hamstrings", "shoulder mobility"
-    target_duration_minutes: int = Field(20, ge=5, le=120)
+    target_duration_minutes: int = Field(20, ge=5, le=45)  # 20 is only the fallback when omitted
     available_equipment: Optional[List[str]] = None
     context_overrides: Optional[dict] = None
 
