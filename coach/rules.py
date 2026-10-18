@@ -10,7 +10,17 @@ HIGH_VOLUME_MIN_SETS = 3
 SHORT_REST_HOURS = 12
 SAME_FOCUS_WINDOW_HOURS = 24
 FLOW_TIME_TOLERANCE_PERCENT = 15
+FLOW_TIME_MIN_TOLERANCE_SECONDS = 60
+FLOW_TIME_MAX_TOLERANCE_SECONDS = 120
+# Setup time added at every change of exercise; the frontend runner (utils/flowSteps.js) must use the same value.
+TRANSITION_BUFFER_SECONDS = 5
 
+BLOCK_ORDER = (
+    'Prep / Dynamic Flow',
+    'Primary Skill / Strength',
+    'Accessory / Hypertrophy',
+    'Down-Regulation / Cool Down',
+)
 _OVERHEAD_PRESS = re.compile(
     r'overhead press|\bohp\b|military press|shoulder press|push press|strict press|\bjerk\b', re.I
 )
@@ -49,15 +59,51 @@ def pre_generation_constraints(snapshot: UserSnapshot, target_focus: str | None 
     return constraints
 
 
+def station_sequence(response: CoachWorkoutResponse) -> list:
+    """Exercises in the order the runner plays them, one entry per set (mirrors frontend buildSteps)."""
+    sequence = []
+    for block in sorted(response.blocks or [], key=lambda b: BLOCK_ORDER.index(b.block_name)):
+        if block.structure == 'circuit' and len(block.exercises) > 1:
+            for round_number in range(1, max(ex.sets for ex in block.exercises) + 1):
+                sequence.extend(ex for ex in block.exercises if round_number <= ex.sets)
+        else:
+            for ex in block.exercises:
+                sequence.extend([ex] * max(ex.sets, 0))
+    return sequence
+
+
+def total_seconds(response: CoachWorkoutResponse) -> int:
+    """Work time plus rest after every set but the last, plus a buffer at each exercise change."""
+    sequence = station_sequence(response)
+    total = 0
+    for i, ex in enumerate(sequence):
+        total += ex.allocated_seconds or 0
+        if i == len(sequence) - 1:
+            break
+        total += ex.rest_seconds or 0
+        if sequence[i + 1] is not ex:
+            total += TRANSITION_BUFFER_SECONDS
+    return total
+
+
 def _exercise_violations(response: CoachWorkoutResponse) -> list[str]:
     violations = []
     heavy_press_seen = None
     for block in response.blocks:
+        if block.structure == 'circuit':
+            if len(block.exercises) < 2:
+                violations.append(f"'{block.block_name}': a circuit needs at least 2 exercises.")
+            elif len({ex.sets for ex in block.exercises}) > 1:
+                violations.append(
+                    f"'{block.block_name}': circuit exercises must share the same sets value (the number of rounds)."
+                )
         for ex in block.exercises:
             if ex.sets < 1:
                 violations.append(f"'{ex.name}': sets must be at least 1.")
             if not _HAS_NUMBER.search(ex.reps_or_duration):
                 violations.append(f"'{ex.name}': reps_or_duration must include a number of reps or seconds.")
+            if not ex.allocated_seconds or ex.allocated_seconds < 1:
+                violations.append(f"'{ex.name}': allocated_seconds is required (active seconds for one set).")
             if ex.rpe is None:
                 violations.append(f"'{ex.name}': rpe is required.")
 
@@ -95,11 +141,24 @@ def validate_flow(response: CoachWorkoutResponse, target_minutes: int) -> list[s
         return ['blocks are required for a flow.']
 
     violations = _exercise_violations(response)
-    low = -(-target_minutes * (100 - FLOW_TIME_TOLERANCE_PERCENT) // 100)  # ceil
-    high = target_minutes * (100 + FLOW_TIME_TOLERANCE_PERCENT) // 100
-    if not low <= response.estimated_total_minutes <= high:
+
+    # Every exercise that is followed by another set or exercise needs a rest to schedule.
+    sequence = station_sequence(response)
+    for ex in {id(e): e for e in sequence[:-1]}.values():
+        if not ex.rest_seconds:
+            violations.append(f"'{ex.name}': rest_seconds is required (only the final exercise may omit it).")
+
+    target_seconds = target_minutes * 60
+    tolerance = min(
+        FLOW_TIME_MAX_TOLERANCE_SECONDS,
+        max(FLOW_TIME_MIN_TOLERANCE_SECONDS, target_seconds * FLOW_TIME_TOLERANCE_PERCENT // 100),
+    )
+    total = total_seconds(response)
+    if abs(total - target_seconds) > tolerance:
         violations.append(
-            f'estimated_total_minutes is {response.estimated_total_minutes}; it must be between '
-            f'{low} and {high} for a {target_minutes}-minute flow. Adjust sets, rest or exercise count.'
+            f'Computed session time is {total}s ({total / 60:.1f} min): sum of sets x allocated_seconds, '
+            f'rest_seconds after every set except the last, and {TRANSITION_BUFFER_SECONDS}s per exercise change. '
+            f'It must be within {tolerance}s of {target_seconds}s for a {target_minutes}-minute flow. '
+            'Adjust sets, allocated_seconds or rest_seconds, or remove an exercise.'
         )
     return violations

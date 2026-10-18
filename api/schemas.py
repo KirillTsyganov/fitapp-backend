@@ -72,6 +72,8 @@ class ExerciseItem(BaseModel):
     target_pattern: str  # e.g. "hip_hinge", "knee_flexion", "active_mobility"
     sets: int
     reps_or_duration: str  # e.g. "8 reps", "45s hold"
+    # Active seconds for one set; Optional only so flows saved before this field existed still load.
+    allocated_seconds: Optional[int] = None
     rpe: Optional[int] = Field(None, ge=1, le=10)
     rest_seconds: Optional[int] = None
     transition_notes: Optional[str] = None
@@ -84,6 +86,8 @@ class WorkoutBlock(BaseModel):
         "Accessory / Hypertrophy",
         "Down-Regulation / Cool Down",
     ]
+    # linear: all sets of an exercise in turn. circuit: cycle the exercises for `sets` rounds. None means linear.
+    structure: Optional[Literal["linear", "circuit"]] = None
     exercises: List[ExerciseItem]
 
 # ExerciseItem, WorkoutBlock and CoachWorkoutResponse go to OpenAI strict parsing: no non-None defaults.
@@ -101,12 +105,14 @@ class CoachChatRequest(BaseModel):
     message: str = Field(..., min_length=1, max_length=2000)
     available_equipment: Optional[List[str]] = None
     target_duration_minutes: Optional[int] = Field(None, ge=5, le=45)
+    structure_preference: Optional[Literal["linear", "circuit"]] = None
     context_overrides: Optional[dict] = None
 
 class CreateFlowRequest(BaseModel):
     target_focus: str = Field(..., min_length=2, max_length=120)  # e.g. "hamstrings", "shoulder mobility"
     target_duration_minutes: int = Field(20, ge=5, le=45)  # 20 is only the fallback when omitted
     available_equipment: Optional[List[str]] = None
+    structure_preference: Optional[Literal["linear", "circuit"]] = None
     context_overrides: Optional[dict] = None
 
 class FlowRecordResponse(BaseModel):

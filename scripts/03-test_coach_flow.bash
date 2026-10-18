@@ -33,13 +33,14 @@ BODY="${RESPONSE%$'\n'*}"
 echo "$BODY" | jq
 [[ "$STATUS" == "201" ]] || fail "expected HTTP 201, got $STATUS"
 
-# Time bound: target +/-15%.
+# Time bound: target +/-2 min (estimated_total_minutes is computed from the timeline); every exercise is timed.
 echo "$BODY" | jq -e --argjson t "$TARGET_MINUTES" '
   (.routine_data.estimated_total_minutes - $t) as $d
   | .duration_minutes == $t
-  and ((if $d < 0 then -$d else $d end) * 100 <= $t * 15)
+  and ((if $d < 0 then -$d else $d end) <= 2)
   and (.routine_data.blocks | length) > 0
-' > /dev/null || fail "flow is not ${TARGET_MINUTES} min +/-15% with at least one block"
+  and ([.routine_data.blocks[].exercises[].allocated_seconds] | all(. != null and . > 0))
+' > /dev/null || fail "flow is not ${TARGET_MINUTES} min +/-2 with timed exercises and at least one block"
 
 FLOW_ID=$(echo "$BODY" | jq -r '.id')
 

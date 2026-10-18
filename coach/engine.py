@@ -51,6 +51,7 @@ def _build_context_message(
     equipment: list[str],
     duration_minutes: int | None,
     target_focus: str | None,
+    structure: str | None = None,
 ) -> str:
     constraints = rules.pre_generation_constraints(snapshot, target_focus)
     parts = [
@@ -62,6 +63,7 @@ def _build_context_message(
         '## Session parameters',
         f"- Available equipment: {', '.join(equipment) or 'not specified (assume bodyweight only)'}",
         f'- Target duration: {duration_minutes} minutes' if duration_minutes else '- Target duration: not specified',
+        f'- Preferred structure: {structure}' if structure else '- Preferred structure: not specified (you choose)',
     ]
     return '\n'.join(parts)
 
@@ -75,9 +77,12 @@ def _generate(
     validate: Callable[[CoachWorkoutResponse], list[str]],
     target_focus: str | None = None,
     flow_mode: bool = False,
+    structure: str | None = None,
 ) -> CoachWorkoutResponse:
     snapshot = memory.get_user_snapshot(user_id, overrides)
-    context = _build_context_message(snapshot, memory.clean_list(equipment), duration_minutes, target_focus)
+    context = _build_context_message(
+        snapshot, memory.clean_list(equipment), duration_minutes, target_focus, structure,
+    )
 
     messages = [
         {'role': 'system', 'content': SYSTEM_PROMPT},
@@ -109,12 +114,13 @@ def chat(user_id: int, req: CoachChatRequest) -> CoachWorkoutResponse:
     return _generate(
         user_id, req.message, req.available_equipment, req.target_duration_minutes, req.context_overrides,
         validate=rules.validate_workout,
+        structure=req.structure_preference,
     )
 
 
 def generate_flow(user_id: int, req: CreateFlowRequest) -> CoachWorkoutResponse:
     target_focus = ' '.join(req.target_focus.split())
-    return _generate(
+    result = _generate(
         user_id,
         f'Create a {req.target_duration_minutes}-minute flow targeting: {target_focus}.',
         req.available_equipment,
@@ -123,4 +129,8 @@ def generate_flow(user_id: int, req: CreateFlowRequest) -> CoachWorkoutResponse:
         validate=lambda r: rules.validate_flow(r, req.target_duration_minutes),
         target_focus=target_focus,
         flow_mode=True,
+        structure=req.structure_preference,
     )
+    # The runner plays exactly this timeline, so report it rather than the model's own estimate.
+    result.estimated_total_minutes = round(rules.total_seconds(result) / 60)
+    return result
