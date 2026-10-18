@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
-# End-to-end check: POST /api/coach/flow (20 min, hamstrings), then confirm it is listed by GET /api/coach/flows.
+# End-to-end check: POST /api/coach/flow (hamstrings, TARGET_MINUTES, default 20), then confirm it is listed by GET /api/coach/flows.
 # Needs: server running with OPENAI_API_KEY, an existing user (see 01-add_user.bash), jq, and PyJWT (flask venv).
 set -euo pipefail
 
 BASE_URL="${BASE_URL:-http://localhost:5000}"
 USER_ID="${USER_ID:-1}"
-TARGET_MINUTES=20
+TARGET_MINUTES="${TARGET_MINUTES:-20}"  # any 5-45
 JWT_SECRET_KEY="${JWT_SECRET_KEY:-development-secret-key-must-be-at-least-32-bytes-long}"  # must match the server
 
 fail() { echo "FAIL: $1" >&2; exit 1; }
@@ -33,13 +33,13 @@ BODY="${RESPONSE%$'\n'*}"
 echo "$BODY" | jq
 [[ "$STATUS" == "201" ]] || fail "expected HTTP 201, got $STATUS"
 
-# Time bound: 17-23 min for a 20 min target (+/-15%).
+# Time bound: target +/-15%.
 echo "$BODY" | jq -e --argjson t "$TARGET_MINUTES" '
   (.routine_data.estimated_total_minutes - $t) as $d
   | .duration_minutes == $t
   and ((if $d < 0 then -$d else $d end) * 100 <= $t * 15)
   and (.routine_data.blocks | length) > 0
-' > /dev/null || fail "flow is not 20 min +/-15% with at least one block"
+' > /dev/null || fail "flow is not ${TARGET_MINUTES} min +/-15% with at least one block"
 
 FLOW_ID=$(echo "$BODY" | jq -r '.id')
 
