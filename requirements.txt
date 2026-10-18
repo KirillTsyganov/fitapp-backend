@@ -8,3 +8,4 @@ authlib
 PyJWT
 requests
 sqlalchemy
+openai>=1.40
