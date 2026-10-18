@@ -95,11 +95,11 @@ def validate_flow(response: CoachWorkoutResponse, target_minutes: int) -> list[s
         return ['blocks are required for a flow.']
 
     violations = _exercise_violations(response)
-    if abs(response.estimated_total_minutes - target_minutes) * 100 > target_minutes * FLOW_TIME_TOLERANCE_PERCENT:
-        low = target_minutes * (100 - FLOW_TIME_TOLERANCE_PERCENT) / 100
-        high = target_minutes * (100 + FLOW_TIME_TOLERANCE_PERCENT) / 100
+    low = -(-target_minutes * (100 - FLOW_TIME_TOLERANCE_PERCENT) // 100)  # ceil
+    high = target_minutes * (100 + FLOW_TIME_TOLERANCE_PERCENT) // 100
+    if not low <= response.estimated_total_minutes <= high:
         violations.append(
             f'estimated_total_minutes is {response.estimated_total_minutes}; it must be between '
-            f'{low:g} and {high:g} for a {target_minutes}-minute flow. Adjust sets, rest or exercise count.'
+            f'{low} and {high} for a {target_minutes}-minute flow. Adjust sets, rest or exercise count.'
         )
     return violations

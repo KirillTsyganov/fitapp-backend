@@ -5,5 +5,5 @@ OPENAI_API_KEY = os.environ.get('OPENAI_API_KEY', '')
 OPENAI_MODEL = os.environ.get('OPENAI_MODEL', 'gpt-5.5')
 # Reasoning models only; set to an empty string for models that reject the parameter.
 OPENAI_REASONING_EFFORT = os.environ.get('OPENAI_REASONING_EFFORT', 'low')
-# Two attempts must fit inside the serverless function's max duration.
-OPENAI_TIMEOUT_SECONDS = float(os.environ.get('OPENAI_TIMEOUT_SECONDS', '25'))
+# Per attempt; vercel.json maxDuration (60s) covers one attempt plus overhead, not two full timeouts.
+OPENAI_TIMEOUT_SECONDS = float(os.environ.get('OPENAI_TIMEOUT_SECONDS', '35'))
