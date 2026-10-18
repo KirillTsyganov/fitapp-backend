@@ -24,6 +24,7 @@ from schemas import (
 )
 from coach import engine as coach_engine
 from coach.engine import CoachError
+from vercel_path import RestoreVercelPath
 
 # --- Circuit Definition ---
 CIRCUIT = [
@@ -37,6 +38,7 @@ JWT_SECRET = os.environ.get('JWT_SECRET_KEY', 'dev-only-jwt-secret')        # JW
 FRONTEND_URL = os.environ.get('FRONTEND_URL', 'http://localhost:5173').rstrip('/')
 
 app = Flask(__name__)
+app.wsgi_app = RestoreVercelPath(app.wsgi_app)
 CORS(app, origins=[FRONTEND_URL], allow_headers=['Content-Type', 'Authorization'])
 app.config['SECRET_KEY'] = os.environ.get('SECRET_KEY', 'dev-only-secret')  # Flask session signing
 

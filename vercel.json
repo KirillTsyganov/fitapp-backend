@@ -1,4 +1,4 @@
 {
   "functions": {"api/index.py": {"maxDuration": 60}},
-  "rewrites": [{"source": "/(.*)", "destination": "/api/index"}]
+  "rewrites": [{"source": "/(.*)", "destination": "/api/index?vercel_path=$1"}]
 }
