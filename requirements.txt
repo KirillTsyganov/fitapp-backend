@@ -7,5 +7,5 @@ python-dotenv
 authlib
 PyJWT
 requests
-sqlalchemy
+sqlalchemy<2.1
 openai>=1.40

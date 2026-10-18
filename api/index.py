@@ -44,6 +44,10 @@ app.config['SECRET_KEY'] = os.environ.get('SECRET_KEY', 'dev-only-secret')  # Fl
 DATABASE_URL = os.environ.get('DATABASE_URL', '')
 if DATABASE_URL.startswith('postgres://'):
     DATABASE_URL = DATABASE_URL.replace('postgres://', 'postgresql://', 1)
+# SQLAlchemy 2.1 defaults plain postgresql:// to psycopg v3; only psycopg2 is installed.
+DATABASE_URL = DATABASE_URL.replace('postgresql+psycopg://', 'postgresql://', 1)
+if DATABASE_URL.startswith('postgresql://'):
+    DATABASE_URL = DATABASE_URL.replace('postgresql://', 'postgresql+psycopg2://', 1)
 # strip channel_binding — not a valid SQLAlchemy/psycopg2 parameter
 DATABASE_URL = DATABASE_URL.replace('channel_binding=require&', '').replace('&channel_binding=require', '').replace('channel_binding=require', '')
 
