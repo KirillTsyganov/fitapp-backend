@@ -1,14 +1,18 @@
 """OpenAI orchestration: memory -> pre-checks -> structured generation -> post-validation."""
+import logging
+from typing import Callable
+
 from openai import OpenAI, OpenAIError
 
-from schemas import CoachChatRequest, CoachRoutineRequest, CoachWorkoutResponse
+from schemas import CoachChatRequest, CoachWorkoutResponse, CreateFlowRequest
 
 from . import memory, rules
-from .config import OPENAI_API_KEY, OPENAI_MODEL, OPENAI_TIMEOUT_SECONDS
-from .prompts import FEW_SHOT_MESSAGES, SYSTEM_PROMPT
+from .config import OPENAI_API_KEY, OPENAI_MODEL, OPENAI_REASONING_EFFORT, OPENAI_TIMEOUT_SECONDS
+from .prompts import FEW_SHOT_MESSAGES, FLOW_MODE_INSTRUCTIONS, SYSTEM_PROMPT
 
 MAX_ATTEMPTS = 2
-ROUTINE_REQUEST_MESSAGE = "Generate my full session for today."
+
+logger = logging.getLogger(__name__)
 
 
 class CoachError(Exception):
@@ -18,7 +22,8 @@ class CoachError(Exception):
 def _client() -> OpenAI:
     if not OPENAI_API_KEY:
         raise CoachError('Coach is not configured.')
-    return OpenAI(api_key=OPENAI_API_KEY, timeout=OPENAI_TIMEOUT_SECONDS)
+    # No SDK retries: the timeout is per attempt and MAX_ATTEMPTS must fit the function limit.
+    return OpenAI(api_key=OPENAI_API_KEY, timeout=OPENAI_TIMEOUT_SECONDS, max_retries=0)
 
 
 def _parse(client: OpenAI, messages: list[dict]) -> CoachWorkoutResponse:
@@ -27,8 +32,10 @@ def _parse(client: OpenAI, messages: list[dict]) -> CoachWorkoutResponse:
             model=OPENAI_MODEL,
             messages=messages,
             response_format=CoachWorkoutResponse,
+            **({'reasoning_effort': OPENAI_REASONING_EFFORT} if OPENAI_REASONING_EFFORT else {}),
         )
     except OpenAIError as exc:
+        logger.warning('OpenAI request failed: %s: %s', type(exc).__name__, exc)
         raise CoachError('Coach service is unavailable.') from exc
 
     message = completion.choices[0].message
@@ -43,8 +50,9 @@ def _build_context_message(
     snapshot: memory.UserSnapshot,
     equipment: list[str],
     duration_minutes: int | None,
+    target_focus: str | None,
 ) -> str:
-    constraints = rules.pre_generation_constraints(snapshot)
+    constraints = rules.pre_generation_constraints(snapshot, target_focus)
     parts = [
         memory.format_context(snapshot),
         '',
@@ -53,7 +61,7 @@ def _build_context_message(
         '',
         '## Session parameters',
         f"- Available equipment: {', '.join(equipment) or 'not specified (assume bodyweight only)'}",
-        f'- Target duration: {duration_minutes or 45} minutes',
+        f'- Target duration: {duration_minutes} minutes' if duration_minutes else '- Target duration: not specified',
     ]
     return '\n'.join(parts)
 
@@ -64,21 +72,25 @@ def _generate(
     equipment: list[str] | None,
     duration_minutes: int | None,
     overrides: dict | None,
+    validate: Callable[[CoachWorkoutResponse], list[str]],
+    target_focus: str | None = None,
+    flow_mode: bool = False,
 ) -> CoachWorkoutResponse:
     snapshot = memory.get_user_snapshot(user_id, overrides)
-    context = _build_context_message(snapshot, memory.clean_list(equipment), duration_minutes)
+    context = _build_context_message(snapshot, memory.clean_list(equipment), duration_minutes, target_focus)
 
     messages = [
         {'role': 'system', 'content': SYSTEM_PROMPT},
         *FEW_SHOT_MESSAGES,
         {'role': 'system', 'content': context},
+        *([{'role': 'system', 'content': FLOW_MODE_INSTRUCTIONS}] if flow_mode else []),
         {'role': 'user', 'content': user_message},
     ]
 
     client = _client()
     for _ in range(MAX_ATTEMPTS):
         response = _parse(client, messages)
-        violations = rules.validate_workout(response)
+        violations = validate(response)
         if not violations:
             return response
         messages = [
@@ -95,12 +107,20 @@ def _generate(
 
 def chat(user_id: int, req: CoachChatRequest) -> CoachWorkoutResponse:
     return _generate(
-        user_id, req.message, req.available_equipment, req.target_duration_minutes, req.context_overrides
+        user_id, req.message, req.available_equipment, req.target_duration_minutes, req.context_overrides,
+        validate=rules.validate_workout,
     )
 
 
-def routine(user_id: int, req: CoachRoutineRequest) -> CoachWorkoutResponse:
+def generate_flow(user_id: int, req: CreateFlowRequest) -> CoachWorkoutResponse:
+    target_focus = ' '.join(req.target_focus.split())
     return _generate(
-        user_id, ROUTINE_REQUEST_MESSAGE, req.available_equipment, req.target_duration_minutes,
+        user_id,
+        f'Create a {req.target_duration_minutes}-minute flow targeting: {target_focus}.',
+        req.available_equipment,
+        req.target_duration_minutes,
         req.context_overrides,
+        validate=lambda r: rules.validate_flow(r, req.target_duration_minutes),
+        target_focus=target_focus,
+        flow_mode=True,
     )

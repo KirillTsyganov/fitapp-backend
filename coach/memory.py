@@ -2,7 +2,7 @@
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 
-from models import db, PushupSet, WorkoutSession
+from models import db, Flow, PushupSet, WorkoutSession
 
 # Only the pushup/lunge circuit is logged today; extend as new exercise types are added.
 EXERCISE_TO_PATTERN = {
@@ -16,6 +16,17 @@ LOOKBACK_DAYS = 7
 FATIGUE_WINDOW_HOURS = 72
 FATIGUE_MODERATE_REPS = 60
 FATIGUE_HIGH_REPS = 120
+FLOW_LOOKBACK_DAYS = 14
+FLOW_HISTORY_LIMIT = 5
+
+
+@dataclass
+class RecentFlow:
+    name: str
+    target_focus: str
+    duration_minutes: int
+    hours_ago: float
+    exercises: list[str]
 
 
 @dataclass
@@ -27,6 +38,11 @@ class UserSnapshot:
     hours_since_last_session: float | None
     flagged_joints: list[str] = field(default_factory=list)
     skill_goals: list[str] = field(default_factory=list)
+    recent_flows: list[RecentFlow] = field(default_factory=list)
+
+
+def _one_line(text, max_len: int) -> str:
+    return ' '.join(str(text).split())[:max_len]
 
 
 def clean_list(value, max_items: int = 10, max_len: int = 60) -> list[str]:
@@ -36,10 +52,42 @@ def clean_list(value, max_items: int = 10, max_len: int = 60) -> list[str]:
     cleaned = []
     for item in value[:max_items]:
         if isinstance(item, str):
-            text = ' '.join(item.split())[:max_len]
+            text = _one_line(item, max_len)
             if text:
                 cleaned.append(text)
     return cleaned
+
+
+def _exercise_names(routine_data) -> list[str]:
+    """Tolerant of malformed or older routine_data shapes."""
+    blocks = routine_data.get('blocks') if isinstance(routine_data, dict) else None
+    names = []
+    for block in blocks if isinstance(blocks, list) else []:
+        exercises = block.get('exercises') if isinstance(block, dict) else None
+        for ex in exercises if isinstance(exercises, list) else []:
+            if isinstance(ex, dict) and isinstance(ex.get('name'), str):
+                names.append(_one_line(ex['name'], 60))
+    return names
+
+
+def _recent_flows(user_id: int, now: datetime) -> list[RecentFlow]:
+    flows = (
+        Flow.query
+        .filter(Flow.user_id == user_id, Flow.created_at >= now - timedelta(days=FLOW_LOOKBACK_DAYS))
+        .order_by(Flow.created_at.desc())
+        .limit(FLOW_HISTORY_LIMIT)
+        .all()
+    )
+    return [
+        RecentFlow(
+            name=_one_line(f.name, 120),
+            target_focus=_one_line(f.target_focus, 120),
+            duration_minutes=f.duration_minutes,
+            hours_ago=(now - f.created_at).total_seconds() / 3600,
+            exercises=_exercise_names(f.routine_data),
+        )
+        for f in flows
+    ]
 
 
 def _fatigue_level(reps: int) -> str:
@@ -84,6 +132,7 @@ def get_user_snapshot(user_id: int, overrides: dict | None = None) -> UserSnapsh
         hours_since_last_session=(now - last_set_at).total_seconds() / 3600 if last_set_at else None,
         flagged_joints=clean_list(overrides.get('flagged_joints')),
         skill_goals=clean_list(overrides.get('skill_goals')),
+        recent_flows=_recent_flows(user_id, now),
     )
 
 
@@ -109,5 +158,15 @@ def format_context(snapshot: UserSnapshot) -> str:
         f"- Flagged joints: {', '.join(snapshot.flagged_joints) or 'none reported'}",
         f"- Skill goals: {', '.join(snapshot.skill_goals) or 'none reported'}",
         '- Logged data only covers the pushup/lunge circuit; other training is unknown.',
+        '',
+        f'## Recent flows (last {FLOW_LOOKBACK_DAYS} days)',
     ]
+    if snapshot.recent_flows:
+        for f in snapshot.recent_flows:
+            lines.append(
+                f'- {f.hours_ago:.0f}h ago: "{f.name}" | focus: {f.target_focus} | {f.duration_minutes} min | '
+                f"{', '.join(f.exercises) or 'no exercise detail'}"
+            )
+    else:
+        lines.append('- none')
     return '\n'.join(lines)

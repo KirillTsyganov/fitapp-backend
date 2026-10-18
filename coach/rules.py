@@ -8,6 +8,8 @@ from .memory import UserSnapshot
 HEAVY_PRESS_MIN_RPE = 7
 HIGH_VOLUME_MIN_SETS = 3
 SHORT_REST_HOURS = 12
+SAME_FOCUS_WINDOW_HOURS = 24
+FLOW_TIME_TOLERANCE_PERCENT = 15
 
 _OVERHEAD_PRESS = re.compile(
     r'overhead press|\bohp\b|military press|shoulder press|push press|strict press|\bjerk\b', re.I
@@ -18,7 +20,7 @@ _STRAIGHT_ARM = re.compile(
 _HAS_NUMBER = re.compile(r'\d')
 
 
-def pre_generation_constraints(snapshot: UserSnapshot) -> list[str]:
+def pre_generation_constraints(snapshot: UserSnapshot, target_focus: str | None = None) -> list[str]:
     """Hard constraints derived from user state, injected into the prompt."""
     constraints = []
     for joint in snapshot.flagged_joints:
@@ -35,14 +37,19 @@ def pre_generation_constraints(snapshot: UserSnapshot) -> list[str]:
         constraints.append(
             f"Last session was {hours:.0f}h ago: keep today low intensity (mobility, yoga, light technique work)."
         )
+    if target_focus:
+        wanted = target_focus.lower()
+        for flow in snapshot.recent_flows:
+            past = flow.target_focus.lower()
+            if flow.hours_ago < SAME_FOCUS_WINDOW_HOURS and (wanted in past or past in wanted):
+                constraints.append(
+                    f"A '{flow.target_focus}' flow was generated {flow.hours_ago:.0f}h ago: vary exercise selection "
+                    f"and do not repeat: {', '.join(flow.exercises) or 'n/a'}."
+                )
     return constraints
 
 
-def validate_workout(response: CoachWorkoutResponse) -> list[str]:
-    """Return rule violations for a generated workout; an empty list means it passes."""
-    if not response.blocks:
-        return []
-
+def _exercise_violations(response: CoachWorkoutResponse) -> list[str]:
     violations = []
     heavy_press_seen = None
     for block in response.blocks:
@@ -70,4 +77,29 @@ def validate_workout(response: CoachWorkoutResponse) -> list[str]:
                     f"'{ex.name}': high-volume straight-arm work must not follow heavy overhead press "
                     f"('{heavy_press_seen}'); move it before the press or reduce it."
                 )
+    return violations
+
+
+def validate_workout(response: CoachWorkoutResponse) -> list[str]:
+    """Chat validation: replies without blocks are valid; otherwise check every exercise."""
+    if not response.blocks:
+        return []
+    return _exercise_violations(response)
+
+
+def validate_flow(response: CoachWorkoutResponse, target_minutes: int) -> list[str]:
+    """Flows never defer to a diagnostic question; blocks, exercises and time bounds must pass."""
+    if response.diagnostic_needed:
+        return ['diagnostic_needed must be false for flows: assume baseline readiness and return all blocks.']
+    if not response.blocks:
+        return ['blocks are required for a flow.']
+
+    violations = _exercise_violations(response)
+    if abs(response.estimated_total_minutes - target_minutes) * 100 > target_minutes * FLOW_TIME_TOLERANCE_PERCENT:
+        low = target_minutes * (100 - FLOW_TIME_TOLERANCE_PERCENT) / 100
+        high = target_minutes * (100 + FLOW_TIME_TOLERANCE_PERCENT) / 100
+        violations.append(
+            f'estimated_total_minutes is {response.estimated_total_minutes}; it must be between '
+            f'{low:g} and {high:g} for a {target_minutes}-minute flow. Adjust sets, rest or exercise count.'
+        )
     return violations
