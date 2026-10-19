@@ -17,7 +17,7 @@ from flask import Flask, jsonify, redirect, request, url_for
 from flask_cors import CORS
 from pydantic import ValidationError
 
-from models import db, User, WorkoutSession, PushupSet, UserSettings, FlowSequence, FlowExercise, Flow
+from models import db, User, WorkoutSession, PushupSet, UserSettings, Flow
 from schemas import (
     UserCreate, SetCreate, RoundCreate,
     CoachChatRequest, CreateFlowRequest, FlowRecordResponse,
@@ -657,113 +657,6 @@ def get_user_stats(user_id):
         'total_sessions_completed': len(completed_sessions),
         'active_session': active_data,
     })
-
-
-# ----------------------------------------------------
-# FLOW SEQUENCE ROUTES
-# ----------------------------------------------------
-
-def _serialize_flow(flow: FlowSequence):
-    return {
-        'id': flow.id,
-        'name': flow.name,
-        'total_duration': flow.total_duration,
-        'created_at': flow.created_at.isoformat(),
-        'exercises': [
-            {
-                'id': ex.exercise_id,
-                'name': ex.exercise_name,
-                'duration': ex.duration,
-                'repeats': ex.repeats,
-            }
-            for ex in sorted(flow.exercises, key=lambda e: e.position)
-        ],
-    }
-
-
-@app.route('/api/flows', methods=['GET'])
-def list_flows():
-    user = _current_user()
-    if not user:
-        return jsonify({'error': 'Unauthorized'}), 401
-    flows = (
-        FlowSequence.query
-        .filter_by(user_id=user.id)
-        .order_by(FlowSequence.created_at.desc())
-        .all()
-    )
-    return jsonify([_serialize_flow(f) for f in flows])
-
-
-@app.route('/api/flows', methods=['POST'])
-def create_flow():
-    user = _current_user()
-    if not user:
-        return jsonify({'error': 'Unauthorized'}), 401
-
-    body = request.get_json(silent=True) or {}
-    name = str(body.get('name', '')).strip()[:120]
-    if not name:
-        return jsonify({'error': 'name is required'}), 422
-
-    exercises_data = body.get('exercises', [])
-    if not isinstance(exercises_data, list) or len(exercises_data) == 0:
-        return jsonify({'error': 'exercises must be a non-empty list'}), 422
-    if len(exercises_data) > 50:
-        return jsonify({'error': 'Too many exercises (max 50)'}), 422
-
-    flow = FlowSequence(user_id=user.id, name=name)
-    db.session.add(flow)
-    db.session.flush()
-
-    total_duration = 0
-    for i, ex in enumerate(exercises_data):
-        try:
-            duration = max(1, int(ex.get('duration', 30)))
-            repeats = max(1, int(ex.get('repeats', 1)))
-        except (TypeError, ValueError):
-            return jsonify({'error': f'Invalid duration or repeats at position {i}'}), 422
-        db.session.add(FlowExercise(
-            sequence_id=flow.id,
-            position=i,
-            exercise_id=str(ex.get('exercise_id', ''))[:20],
-            exercise_name=str(ex.get('exercise_name', ''))[:120],
-            duration=duration,
-            repeats=repeats,
-        ))
-        total_duration += duration * repeats
-
-    flow.total_duration = total_duration
-    db.session.commit()
-    return jsonify(_serialize_flow(flow)), 201
-
-
-@app.route('/api/flows/<int:flow_id>', methods=['GET'])
-def get_flow(flow_id):
-    user = _current_user()
-    if not user:
-        return jsonify({'error': 'Unauthorized'}), 401
-    flow = db.session.get(FlowSequence, flow_id)
-    if not flow:
-        return jsonify({'error': 'Not found'}), 404
-    if flow.user_id != user.id:
-        return jsonify({'error': 'Forbidden'}), 403
-    return jsonify(_serialize_flow(flow))
-
-
-@app.route('/api/flows/<int:flow_id>', methods=['DELETE'])
-def delete_flow(flow_id):
-    user = _current_user()
-    if not user:
-        return jsonify({'error': 'Unauthorized'}), 401
-    flow = db.session.get(FlowSequence, flow_id)
-    if not flow:
-        return jsonify({'error': 'Not found'}), 404
-    if flow.user_id != user.id:
-        return jsonify({'error': 'Forbidden'}), 403
-    db.session.delete(flow)
-    db.session.commit()
-    return '', 204
 
 
 # ----------------------------------------------------
