@@ -79,7 +79,7 @@ class ExerciseItem(BaseModel):
     rpe: Optional[int] = Field(None, ge=1, le=10)
     rest_seconds: Optional[int] = None
     transition_notes: Optional[str] = None
-    notes: Optional[str] = None
+    notes: Optional[str] = None  # form cues: starting setup first, then movement, optional regression
 
 class WorkoutBlock(BaseModel):
     block_name: Literal[

@@ -59,11 +59,27 @@ Fit it to the target duration and the available equipment (assume bodyweight onl
 ## Exercise requirements
 Every exercise must have: modality (weights, calisthenics, mobility or yoga), a target_pattern, \
 a positive integer sets, reps_or_duration containing a number (e.g. "8 reps", "45s hold"), \
-allocated_seconds (positive integer), an rpe from 1 to 10, and rest_seconds. Use "notes" for cues and \
-regressions; use null for any field that does not apply.
+allocated_seconds (positive integer), an rpe from 1 to 10, and rest_seconds. Use "notes" for form cues and \
+regressions (see the form cues rule below); use null for any other field that does not apply.
 Provide an animation_slug matching the base movement archetype in snake_case (e.g., hip_hinge, squat, lunge, \
 horizontal_push, vertical_push, glute_bridge, plank, forward_fold, hamstring_sweep). Fall back to the \
 normalized target_pattern if an exact slug does not apply.
+
+FORM CUES FORMATTING RULE:
+Every exercise's "notes" (its form cues) MUST strictly lead with the physical starting setup before explaining \
+the movement:
+1. Starting Setup (first sentence):
+   - Clear orientation, e.g. "Stand upright tall", "Lie flat on your back (supine)", "Lie flat on your \
+stomach (prone)", "Kneel on all fours", "Sit tall on the floor with legs outstretched (long-sit)".
+   - Hand and foot anchor positions: state exactly where the hands, arms, feet and knees start relative to \
+the floor or body.
+2. Execution & Movement (subsequent sentences):
+   - The primary concentric/eccentric movement pathway.
+   - Tempo, range of motion and breathing cues.
+3. Regression / Modification (optional final sentence):
+   - A practical regression if needed, e.g. "Regress by elevating hands...".
+Never jump directly into movement cues (do NOT start with "Drive hips back..." or "Lock elbows..."). Always \
+anchor the starting body position first.
 
 ## Conversation rules
 - If the user asks a question that does not need a workout, answer in "message" and leave blocks empty.
@@ -121,7 +137,12 @@ _EXAMPLE = CoachWorkoutResponse(
                     name="Active Straight-Leg Raise", modality="mobility", target_pattern="active_mobility",
                     sets=3, reps_or_duration="8 reps per leg", allocated_seconds=45, rpe=3, rest_seconds=15,
                     transition_notes="Move straight into loaded hinging while the hips feel open.",
-                    notes="Keep the opposite thigh pressed into the floor.",
+                    notes=(
+                        "Lie flat on your back (supine) with both legs straight, arms by your sides palms down, and the "
+                        "opposite thigh pressed into the floor. Lift one straight leg as high as you can without bending "
+                        "the knee or tilting the pelvis, exhaling as you rise, then lower it over 3 seconds. "
+                        "Regress by bending the working knee slightly."
+                    ),
                 ),
             ],
         ),
@@ -134,7 +155,12 @@ _EXAMPLE = CoachWorkoutResponse(
                     animation_slug="hip_hinge",
                     sets=3, reps_or_duration="8 reps", allocated_seconds=45, rpe=7, rest_seconds=75,
                     transition_notes="Rest, then switch to the single-leg hinge.",
-                    notes="Neutral spine, 3s lowering.",
+                    notes=(
+                        "Stand upright tall with feet hip-width apart, knees softly bent, and the weights hanging in front "
+                        "of your thighs with straight arms. Push your hips back with a neutral spine, lowering the weights "
+                        "along your legs over 3 seconds until the hamstrings stretch, then drive the hips forward to stand, "
+                        "exhaling as you rise. Regress with a lighter load or a shorter range."
+                    ),
                 ),
             ],
         ),
@@ -146,7 +172,13 @@ _EXAMPLE = CoachWorkoutResponse(
                     name="Single-Leg Romanian Deadlift", modality="weights", target_pattern="hip_hinge",
                     animation_slug="hip_hinge",
                     sets=3, reps_or_duration="8 reps per leg", allocated_seconds=50, rpe=6, rest_seconds=60,
-                    transition_notes="Lie down for the cool-down.", notes="Light load; touch a wall for balance if needed.",
+                    transition_notes="Lie down for the cool-down.",
+                    notes=(
+                        "Stand upright tall on one foot with a soft knee, the other foot just off the floor, light weight in "
+                        "the opposite hand, and a wall within reach. Hinge at the hip, extending the free leg straight behind "
+                        "you until your torso is near parallel to the floor, keeping the hips square, then return with control. "
+                        "Regress by touching a wall for balance."
+                    ),
                 ),
             ],
         ),
@@ -157,7 +189,13 @@ _EXAMPLE = CoachWorkoutResponse(
                 ExerciseItem(
                     name="Hamstring PAILs/RAILs", modality="mobility", target_pattern="active_mobility",
                     sets=3, reps_or_duration="45s hold per leg", allocated_seconds=90, rpe=4, rest_seconds=30,
-                    transition_notes=None, notes="Contract hard for 10s, then slowly lift the leg into new range.",
+                    transition_notes=None,
+                    notes=(
+                        "Lie flat on your back (supine) with one leg straight on the floor and the other leg raised, held "
+                        "behind the thigh with both hands and the foot flexed. Contract hard against your hands for 10 seconds, "
+                        "then slowly lift the leg into new range for 10 seconds, breathing steadily throughout. "
+                        "Regress by bending the raised knee slightly or using a strap."
+                    ),
                 ),
             ],
         ),
