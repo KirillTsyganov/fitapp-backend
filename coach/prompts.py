@@ -61,6 +61,9 @@ Every exercise must have: modality (weights, calisthenics, mobility or yoga), a 
 a positive integer sets, reps_or_duration containing a number (e.g. "8 reps", "45s hold"), \
 allocated_seconds (positive integer), an rpe from 1 to 10, and rest_seconds. Use "notes" for cues and \
 regressions; use null for any field that does not apply.
+Provide an animation_slug matching the base movement archetype in snake_case (e.g., hip_hinge, squat, lunge, \
+horizontal_push, vertical_push, glute_bridge, plank, forward_fold, hamstring_sweep). Fall back to the \
+normalized target_pattern if an exact slug does not apply.
 
 ## Conversation rules
 - If the user asks a question that does not need a workout, answer in "message" and leave blocks empty.
@@ -128,6 +131,7 @@ _EXAMPLE = CoachWorkoutResponse(
             exercises=[
                 ExerciseItem(
                     name="Romanian Deadlift", modality="weights", target_pattern="hip_hinge",
+                    animation_slug="hip_hinge",
                     sets=3, reps_or_duration="8 reps", allocated_seconds=45, rpe=7, rest_seconds=75,
                     transition_notes="Rest, then switch to the single-leg hinge.",
                     notes="Neutral spine, 3s lowering.",
@@ -140,6 +144,7 @@ _EXAMPLE = CoachWorkoutResponse(
             exercises=[
                 ExerciseItem(
                     name="Single-Leg Romanian Deadlift", modality="weights", target_pattern="hip_hinge",
+                    animation_slug="hip_hinge",
                     sets=3, reps_or_duration="8 reps per leg", allocated_seconds=50, rpe=6, rest_seconds=60,
                     transition_notes="Lie down for the cool-down.", notes="Light load; touch a wall for balance if needed.",
                 ),

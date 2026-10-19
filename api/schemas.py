@@ -70,6 +70,8 @@ class ExerciseItem(BaseModel):
     name: str
     modality: Literal["weights", "calisthenics", "mobility", "yoga"]
     target_pattern: str  # e.g. "hip_hinge", "knee_flexion", "active_mobility"
+    # Movement archetype for the frontend pose library; Optional so flows saved before this field existed still load.
+    animation_slug: Optional[str] = None
     sets: int
     reps_or_duration: str  # e.g. "8 reps", "45s hold"
     # Active seconds for one set; Optional only so flows saved before this field existed still load.
